@@ -1,0 +1,226 @@
+---
+title: "CarD Mtb RNAseq (Kallisto)"
+author: "Dennis Zhu"
+date: "9/30/2019"
+output: 
+  html_document:
+    self_contained: yes
+    highlight: textmate
+    theme: flatly
+    toc: yes
+    toc_float:
+      smooth_scroll: yes
+---
+
+# Part 1 - Data Import & Differential Expression
+
+Loading the R packages that we'll need.
+
+```{r Loading packages}
+library(tximport)
+library(readr)
+library(DESeq2)
+library(apeglm)
+library(pheatmap)
+library(ggplot2)
+library(factoextra)
+library(ggsci)
+```
+
+## Importing Data
+
+The initial steps of the RNA-seq analysis, ie. read alignment and counting, needs to be performed before beginning the DESeq2 workflow in R. In this document, the data will be coming from abundance tables produced by the program **kallisto**, which has pseudoaligned and estimated counts for our reads to the Mtb H37Rv genome. 
+
+```{r Reading in Count Tables, include=FALSE}
+#create a character variable called dir which is the path to your aligned files
+dir <- file.path("/Users/Dennis/Documents/Bioinformatics_Local/CarD_Mtb_RNAseq_data/kallisto_results")
+
+#dir(dir) lists all of the files in a directory
+#create a vector called samples which contains all of the file names
+samples <- dir(dir)
+
+#create a vector called files that contains the path and filenames
+files <- file.path(dir, samples)
+
+#name the vector with the vector of your conditions
+names(files) <- c("r47e_1", "r47e_2", "r47e_3", "k125a_1", "k125a_2", "k125a_3", "i27f_1", "i27f_2", "i27f_3", "i27w_1", "i27w_2", "i27w_3", "wt_1", "wt_2", "wt_3")
+
+#convert transcript IDs to gene names
+tx2gene <- read.table(file.path("/Users/Dennis/Documents/Bioinformatics_Local/conversions", "tx2gene_h37rv.txt"), header = T)
+
+#tximport creates a txi table directing to our files
+txi <- tximport(files, type = "kallisto", tx2gene = tx2gene)
+head(txi$counts)
+```
+
+We can produce a useful table that includes the estimated counts from all of our samples. We'll call this **CarD_RNAseq_kallisto_counts.csv**. Also in this chunk, we'll create a directory called **results** that will contain tables produced in this analysis. 
+
+```{r writing count table}
+#Removing a table from the txi object of just the read counts from each sample
+count_table <- txi$counts
+count_table <- round(count_table, digits=0)
+dir.create("./results")
+write.csv(count_table, file="./results/CarD_RNAseq_kallisto_counts.csv")
+```
+
+## Running DEseq2
+
+We use the R package DEseq2 to perform our normalization steps and differential expression analysis. The conditions for this experiment are the different CarD mutant genotypes, all of which will be compared back to a Mtb strain expressing WT CarD. 
+
+```{r set up for DEseq}
+#create a DEseqtable df to tell DEseq the design of your experiment; each file must be described by at least one condition or variable
+DEseqtable <- data.frame(condition = factor(rep(c("R47E", "K125A", "I27F", "I27W", "WT"), each = 3), levels = c("WT", "R47E", "K125A", "I27F", "I27W")))
+
+#setting the factor levels to help order them later for visualization
+levels(DEseqtable$condition)
+row.names(DEseqtable) <- colnames(txi$counts)
+
+#print it out to make sure it looks right
+DEseqtable
+
+#creating the DESeq2 object
+dds <- DESeqDataSetFromTximport(txi, DEseqtable, ~condition)
+```
+
+Running the normalization steps on our **dds** object, which is the thing that DEseq recognizes. 
+
+```{r DE normalization}
+dds <- DESeq(dds)
+```
+
+The **results()** function then actually performs the comparisons from the normalized and transformed dds object. We create a results table for each of our 4 mutant genotypes compared to the WT expressing strain. 
+
+
+Ultimately after reading and thinking a little more about it, I think that the best way to approach reporting logFoldChange values is just to apply the recommended **apeglm** effect size shrinkage. Ultimately this is all an estimation, and as long as we report it, there's no reason to not use the shrinkage.
+
+```{r DE results}
+res_r47e <- lfcShrink(dds, coef="condition_R47E_vs_WT", type="apeglm")
+res_k125a <- lfcShrink(dds, coef="condition_K125A_vs_WT", type="apeglm")
+res_i27f <- lfcShrink(dds, coef="condition_I27F_vs_WT", type="apeglm")
+res_i27w <- lfcShrink(dds, coef="condition_I27W_vs_WT", type="apeglm")
+```
+
+A summary of those results. 
+
+```{r DE summaries}
+summary(res_r47e)
+summary(res_k125a)
+summary(res_i27f)
+summary(res_i27w)
+```
+
+Extracting a data frame of the results so that we can manipulate the data a little more easily. 
+
+```{r results tables}
+df_r47e <- as.data.frame(res_r47e)
+df_k125a <- as.data.frame(res_k125a)
+df_i27f <- as.data.frame(res_i27f)
+df_i27w <- as.data.frame(res_i27w)
+
+gene_id <- row.names(df_r47e)
+genotypes <- factor(c("R47E", "K125A", "I27F", "I27W"), levels = c("R47E", "K125A", "I27F", "I27W"))
+```
+
+Writing those data frames out to the results folder. Remember that all of these have the apeglm effect size shrinkage applied. 
+
+```{r writing tables}
+write.csv(df_r47e, file = "./results/res_r47e.csv")
+write.csv(df_k125a, file = "./results/res_k125a.csv")
+write.csv(df_i27f, file = "./results/res_i27f.csv")
+write.csv(df_i27w, file = "./results/res_i27w.csv")
+```
+
+# Part 2 - How many genes are differentially expressed?
+
+In this section, I'm asking the question: how many genes are significantly differentially expressed in each of the CarD mutant backgrounds. 
+
+```{r dissecting R47E}
+r_up <- as.vector(row.names(base::subset(df_r47e, log2FoldChange>0 & padj<0.05)))
+r_down <- as.vector(row.names(base::subset(df_r47e, log2FoldChange<0 & padj<0.05)))
+r_count <- c(length(r_up), length(r_down), 4031-length(r_up)-length(r_down))
+names(r_count) <- c("Up", "Down", "Not Sig")
+r_count
+pie(r_count)
+```
+
+```{r dissecting K125A}
+k_up <- as.vector(row.names(base::subset(df_k125a, log2FoldChange>0 & padj<0.05)))
+k_down <- as.vector(row.names(base::subset(df_k125a, log2FoldChange<0 & padj<0.05)))
+k_count <- c(length(k_up), length(k_down), 4031-length(k_up)-length(k_down))
+names(k_count) <- c("Up", "Down", "Not Sig")
+k_count
+pie(k_count)
+```
+
+```{r dissecting I27F}
+f_up <- as.vector(row.names(base::subset(df_i27f, log2FoldChange>0 & padj<0.05)))
+f_down <- as.vector(row.names(base::subset(df_i27f, log2FoldChange<0 & padj<0.05)))
+f_count <- c(length(f_up), length(f_down), 4031-length(f_up)-length(f_down))
+names(f_count) <- c("Up", "Down", "Not Sig")
+f_count
+pie(f_count)
+```
+
+```{r dissecting I27W}
+w_up <- as.vector(row.names(base::subset(df_i27w, log2FoldChange>0 & padj<0.05)))
+w_down <- as.vector(row.names(base::subset(df_i27w, log2FoldChange<0 & padj<0.05)))
+w_count <- c(length(w_up), length(w_down), 4031-length(w_up)-length(w_down))
+names(w_count) <- c("Up", "Down", "Not Sig")
+w_count
+pie(w_count)
+```
+
+We can see that a large proportion of the Mtb genome is differentially expressed in each of the CarD mutant strains. 
+
+# Part 3 - PCA Analysis and Sample Distance Heatmap
+
+Our next question in this analysis is: What are the relationships between the gene expression patterns of the different CarD mutants?
+
+
+There are a couple of basic visualizations that will help us answer this question. One simple one is a sample-sample distance heatmap. 
+
+Before we get started, we need to transform the data into a data matrix that can be easily handled by the principal component analysis calculations as well as the distance matrix calcultions. We also use the **vst()** function to perform a variance stabilizing transformation on the data matrix. 
+
+```{r extracting transformed data}
+count_vst <- vst(count_table)
+count_vst_t <- t(count_vst)
+```
+
+## Sample Distance Heatmap
+
+```{r Sample distance heatmap}
+#By default dist() caluclates the Euclidean distance
+sample_dist <- dist(count_vst_t, method = "euclidean")
+sample_dist.m <- as.matrix(sample_dist)
+
+#use the pheatmap function to create a clustered sample distance heatmap
+pheatmap(sample_dist.m, border_color = "black", show_colnames = T, treeheight_col = 0,  color = colorRampPalette(c("firebrick3", "white", "navy"))(20))
+```
+
+## PCA
+
+Another way to visualize the gene expression differences between our different CarD mutants is by using a principal component analysis. I use **prmcomp()** function in the base Rstats package to calculate the principal components from our data matrix. Then plot the results using ggplot. 
+
+```{r PCA}
+#prcomp() is the PCA function in the base R stats package
+pca_res <- prcomp(count_vst_t, scale = F)
+
+#fviz_pca_ind() is a wrapper for ggplot that is specially made for visualizing PCAs 
+pca_plot <- fviz_pca_ind(pca_res, geom.ind = "point", col.ind=DEseqtable$condition, pointshape=19, pointsize=2, mean.point=F, addEllipses = F, ellipse.type="euclid", axes.linetype="blank") + theme(panel.border = element_rect(fill=NA, color="black"), plot.title = element_blank()) + scale_color_nejm() + theme(legend.position="right", legend.title=element_blank())
+pca_plot
+```
+
+From the PCA plot, we can see that Dimension 1 explains a large proportion of the variance between samples. Additionally, we can examine the contribution of each variable (the expression of each gene) to PC1. This will help us ask: which specific genes are most responsible for the differences between R47E/K125A vs. I27F/I27W. 
+
+We also produce a "Scree plot" using the **fviz_eig()** function, which allows us to see how many "contributing" components the PCA was able to reduce our data down to. Usually the number of dimensions is determined by identifying the "elbow" in the curve. Here it looks like PC1 really is responsible for explaining most of the variance. 
+
+```{r PCA more detailed}
+fviz_eig(pca_res)
+
+#extract a vector showing the contribution of each of the variables (genes) to PC1 
+pca_var <- get_pca_var(pca_res)
+pca_contrib <- pca_var$contrib
+pca_dim1 <- pca_contrib[,1]
+pca_dim1_sorted <- base::sort(pca_dim1, decreasing=T)
+write.csv(pca_dim1, file="./results/pca_card_dim1.csv")
+```
