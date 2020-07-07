@@ -1,0 +1,82 @@
+---
+title: "CarD Mtb RNAseq Clustering Analysis"
+author: "Dennis Zhu"
+date: "07/06/2020"
+output: 
+  html_document:
+    self_contained: yes
+    highlight: textmate
+    theme: flatly
+    toc: yes
+    toc_float:
+      smooth_scroll: yes
+---
+# Introduction
+
+The goal of this RMarkdown is to perform clustering analysis on the Mtb CarD mutant RNAseq data. The input data for right now will just be the transcript-based differential expression data generated from kallisto pseudoalignment. In future versions of this analysis, I'd like to also re-do the whole workflow with a full-alignment and feature counting using htseq, but that will take a while. My goal is to easily produce heatmaps and cluster diagrams in this markdown file.
+
+```{r packages}
+library(pheatmap)
+library(factoextra)
+library(dplyr)
+```
+# Part 1 - Reading in and Formatting Data
+
+```{r reading in data}
+res_r47e <- read.csv("./results/res_r47e.csv", header = T)
+res_k125a <- read.csv("./results/res_k125a.csv", header = T)
+res_i27f <- read.csv("./results/res_i27f.csv", header = T)
+res_i27w <- read.csv("./results/res_i27w.csv", header = T)
+```
+
+```{r combining data}
+df <- data.frame(gene.id = res_r47e$X, 
+                 baseMean = res_r47e$baseMean, 
+                 r47e = res_r47e$log2FoldChange,
+                 r47e.sig = res_r47e$padj,
+                 k125a = res_k125a$log2FoldChange,
+                 k125a.sig = res_k125a$padj,
+                 i27f = res_i27f$log2FoldChange,
+                 i27f.sig = res_i27f$padj,
+                 i27w = res_i27w$log2FoldChange,
+                 i27w.sig = res_i27w$padj)
+df_filtered <- filter(df, abs(r47e) > 1 | abs(k125a) > 1 | abs(i27w) > 1, abs(i27w) > 1)
+kf_weird <- filter(df_filtered, k125a > 1 & i27f > 1)
+df_filtered <- anti_join(df_filtered, kf_weird, by = "gene.id")
+```
+
+This is weird... the result is different from what we published previously and I don't really know why. It could be some different setting in how I ran the kallisto quantification this time? Previously, filtering for genes that were DE at least 2-fold in at least one mutant genotype left us with a list of 394 genes. This time there are 95 genes left after this filtering. It could also be a difference in the fold-change shrinkage used in reporting the data following DESeq2. Either way, let's look at what the heat map looks like with 95 genes. Then lets do a less stringent cutoff, and then finally I think I'll have to see what it looks like with htseq aligned and counted data. 
+
+# Part 2 - Heatmaps with Transcripts DE 2-fold
+
+```{r making matrix}
+matrix_fc2 <- data.frame(r47e = df_filtered$r47e,
+                         k125a = df_filtered$k125a,
+                         i27f = df_filtered$i27f,
+                         i27w = df_filtered$i27w)
+heatmap_scale <- seq(from=-4, to = +4, by= 0.1)
+```
+
+```{r clustering}
+dist_fc2_pearson <- get_dist(matrix_fc2, method = "pearson")
+clust_fc2_pearson_average <- hclust(dist_fc2_pearson, method = "average")
+
+coph <- cophenetic(clust_fc2_pearson_average)
+cor(coph, dist_fc2_pearson)
+```
+
+There are a few things that I'd like to do before finalizing this figure. I'd like to evaluate the different distance measurement and clustering methods, but before I jump the gun with that, I am re-doing the RNAseq quantification using **htseq-count** on Galaxy using the BowTie2 aligned BAM files. Once I have that data, I'll re-analyze them with DEseq2 and revisit the clustering and heatmap analysis. 
+
+```{r making heatmap}
+heatmap_pearson_average <- pheatmap(matrix_fc2, 
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(length(heatmap_scale)), 
+         breaks = heatmap_scale, 
+         treeheight_col = 0, 
+         treeheight_row = 25, 
+         cluster_rows = clust_fc2_pearson_average,
+         cluster_cols = F,
+         fontsize_col = 12, 
+         show_rownames = F, 
+         border_color = "black") 
+heatmap_pearson_average
+```
